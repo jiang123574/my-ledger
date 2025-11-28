@@ -10,6 +10,7 @@ from typing import Optional, List
 import os
 
 # --- 1. 数据库基础配置 ---
+# 自动创建数据目录
 if not os.path.exists("./data"):
     try:
         os.makedirs("./data")
@@ -20,6 +21,7 @@ if not os.path.exists("./data"):
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./data/ledger.db")
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 
+# 开启 SQLite WAL 模式 (提升并发性能) 和 外键约束
 @event.listens_for(engine, "connect")
 def set_sqlite_pragma(dbapi_connection, connection_record):
     cursor = dbapi_connection.cursor()
@@ -30,7 +32,8 @@ def set_sqlite_pragma(dbapi_connection, connection_record):
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
-# --- 2. 定义数据库模型 ---
+# --- 2. 数据库模型定义 (SQLAlchemy) ---
+
 class Category(Base):
     __tablename__ = "categories"
     id = Column(Integer, primary_key=True, index=True)
@@ -38,6 +41,7 @@ class Category(Base):
     type = Column(String) # EXPENSE / INCOME
     parent_id = Column(Integer, ForeignKey('categories.id', ondelete="CASCADE"), nullable=True)
     
+    # 自关联：支持多级分类
     children = relationship("Category", backref=backref('parent', remote_side=[id]), cascade="all, delete")
 
 class Account(Base):
@@ -49,6 +53,7 @@ class Account(Base):
     billing_day = Column(Integer, nullable=True)
     due_day = Column(Integer, nullable=True)
     
+    # 关联交易，级联删除
     sent_transactions = relationship("Transaction", foreign_keys="Transaction.account_id", back_populates="account", cascade="all, delete")
     received_transactions = relationship("Transaction", foreign_keys="Transaction.target_account_id", back_populates="target_account", cascade="all, delete")
 
@@ -84,7 +89,9 @@ class Transaction(Base):
     @property
     def target_account_name(self): return self.target_account.name if self.target_account else None
 
-# --- 3. Pydantic 模型 ---
+# --- 3. Pydantic 数据模型 (Schema) ---
+
+# 分类
 class CategoryCreate(BaseModel):
     name: str; type: str; parent_id: Optional[int] = None
 class CategoryUpdate(BaseModel):
@@ -93,6 +100,7 @@ class CategoryOut(CategoryCreate):
     id: int
     class Config: from_attributes = True
 
+# 账户
 class AccountCreate(BaseModel):
     name: str; type: str; initial_balance: float = 0.0; billing_day: Optional[int] = None; due_day: Optional[int] = None
 class AccountUpdate(AccountCreate): pass
@@ -100,13 +108,21 @@ class AccountOut(AccountCreate):
     id: int; balance: float
     class Config: from_attributes = True
 
+# 交易
 class TransactionCreate(BaseModel):
     date: datetime; type: str; amount: float; category: str = "转账"; 
     tag: Optional[str] = None; 
     note: Optional[str] = None; 
     account_id: int; 
     target_account_id: Optional[int] = None
-    fund_account_id: Optional[int] = None # 辅助字段，不存数据库
+    fund_account_id: Optional[int] = None # 辅助字段：资金来源
+
+class TransactionUpdate(BaseModel):
+    date: datetime; type: str; amount: float; category: str; 
+    tag: Optional[str] = None; 
+    note: Optional[str] = None; 
+    account_id: int; 
+    target_account_id: Optional[int] = None
 
 class TransactionOut(TransactionCreate):
     id: int; account_name: str; target_account_name: Optional[str] = None
@@ -114,13 +130,16 @@ class TransactionOut(TransactionCreate):
 
 # --- 4. 初始化逻辑 ---
 def init_db_data():
+    """初始化数据库表和默认分类数据"""
     print("🔄 检查数据库初始化...")
     try:
         Base.metadata.create_all(bind=engine)
+        print("✅ 数据库表结构确认完毕")
+
         db = SessionLocal()
         count = db.query(Category).count()
         if count == 0:
-            print("📦 写入默认分类...")
+            print("📦 写入默认分类数据...")
             data = [
                 {"name": "餐饮", "type": "EXPENSE", "children": ["早餐", "午餐", "晚餐", "饮料", "零食"]},
                 {"name": "交通", "type": "EXPENSE", "children": ["地铁", "公交", "打车", "加油", "停车"]},
@@ -137,11 +156,12 @@ def init_db_data():
                 for child_name in item["children"]:
                     db.add(Category(name=child_name, type=item["type"], parent_id=parent.id))
             db.commit()
+            print("✅ 默认分类写入完成")
         db.close()
     except Exception as e:
         print(f"❌ 初始化失败: {e}")
 
-# --- 5. FastAPI 生命周期 ---
+# --- 5. FastAPI 应用配置 ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db_data()
@@ -156,7 +176,9 @@ def get_db():
     finally:
         db.close()
 
-# --- 6. API 路由 ---
+# --- 6. API 接口 ---
+
+# === 分类 ===
 @app.get("/api/categories", response_model=List[CategoryOut])
 def read_categories(db: Session = Depends(get_db)):
     return db.query(Category).all()
@@ -179,6 +201,7 @@ def delete_category(id: int, db: Session = Depends(get_db)):
     if obj: db.delete(obj); db.commit()
     return {"ok": True}
 
+# === 账户 ===
 @app.get("/api/accounts", response_model=List[AccountOut])
 def read_accounts(db: Session = Depends(get_db)):
     return db.query(Account).all()
@@ -200,6 +223,7 @@ def delete_account(id: int, db: Session = Depends(get_db)):
     if obj: db.delete(obj); db.commit()
     return {"ok": True}
 
+# === 交易 ===
 @app.get("/api/transactions", response_model=List[TransactionOut])
 def read_transactions(account_id: Optional[int] = None, db: Session = Depends(get_db)):
     q = db.query(Transaction)
@@ -209,16 +233,16 @@ def read_transactions(account_id: Optional[int] = None, db: Session = Depends(ge
 
 @app.post("/api/transactions", response_model=TransactionOut)
 def create_transaction(item: TransactionCreate, db: Session = Depends(get_db)):
-    # 逻辑 A: 普通转账校验
+    # 1. 转账逻辑校验
     if item.type == "TRANSFER":
         if not item.target_account_id: raise HTTPException(400, "需转入账户")
         if item.account_id == item.target_account_id: raise HTTPException(400, "账户不能相同")
     
-    # 逻辑 B: 支出 + 资金来源 = 自动转账 + 支出
+    # 2. 资金联动逻辑 (支出 + 资金来源 = 自动生成转账)
     if item.type == "EXPENSE" and item.fund_account_id:
         if item.account_id == item.fund_account_id: raise HTTPException(400, "支出账户和资金账户不能相同")
         
-        # 自动插入一条转账记录 (资金 -> 支出账户)
+        # 自动创建转账：资金账户 -> 支出账户
         transfer_item = Transaction(
             date=item.date, type="TRANSFER", amount=item.amount,
             category="转账", account_id=item.fund_account_id, target_account_id=item.account_id,
@@ -226,8 +250,8 @@ def create_transaction(item: TransactionCreate, db: Session = Depends(get_db)):
         )
         db.add(transfer_item)
 
-    # 逻辑 C: 创建主要交易记录
-    # [关键修复]：必须显式指定字段，排除 fund_account_id，否则 SQLAlchemy 报错
+    # 3. 创建主交易
+    # [重要] 必须显式赋值，排除 fund_account_id，否则 SQLAlchemy 报错
     db_item = Transaction(
         date=item.date,
         type=item.type,
@@ -240,6 +264,29 @@ def create_transaction(item: TransactionCreate, db: Session = Depends(get_db)):
     )
     
     db.add(db_item)
+    db.commit()
+    db.refresh(db_item)
+    return db_item
+
+@app.put("/api/transactions/{id}", response_model=TransactionOut)
+def update_transaction(id: int, item: TransactionUpdate, db: Session = Depends(get_db)):
+    db_item = db.query(Transaction).filter(Transaction.id == id).first()
+    if not db_item: raise HTTPException(404, "记录不存在")
+    
+    if item.type == "TRANSFER":
+        if not item.target_account_id: raise HTTPException(400, "需转入账户")
+        if item.account_id == item.target_account_id: raise HTTPException(400, "账户不能相同")
+
+    # 更新字段
+    db_item.date = item.date
+    db_item.type = item.type
+    db_item.amount = item.amount
+    db_item.category = item.category
+    db_item.tag = item.tag
+    db_item.note = item.note
+    db_item.account_id = item.account_id
+    db_item.target_account_id = item.target_account_id
+    
     db.commit()
     db.refresh(db_item)
     return db_item

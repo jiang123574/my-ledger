@@ -5,15 +5,15 @@ const activeView = ref('transactions'); const settingsTab = ref('accounts')
 const accounts = ref([]); const categories = ref([]); const transactions = ref([])
 const selectedAccount = ref(null)
 
-// 筛选状态
-const filterMode = ref('MONTH') // 'ALL', 'YEAR', 'MONTH', 'WEEK'
-const cursorDate = ref(new Date())
+const filterMode = ref('MONTH'); const cursorDate = ref(new Date())
 
 const showRecordModal = ref(false); const showAccountModal = ref(false); const showCategoryModal = ref(false)
 
-// 表单数据
 const form = ref({ type: 'EXPENSE', date: new Date().toISOString().split('T')[0], amount: '', category: '', tag: '', note: '', account_id: '', target_account_id: '', fund_account_id: '' })
 const commonTags = ['支付宝', '微信', '云闪付', '美团', '京东', '报销', '出差']
+
+const isTransactionEdit = ref(false); const editTransactionId = ref(null)
+const isContinuous = ref(false) // 连续记录
 
 const isAccountEdit = ref(false); const editAccountId = ref(null)
 const accountForm = ref({ name: '', type: '现金', initial_balance: '', billing_day: '', due_day: '' })
@@ -30,30 +30,39 @@ const fetchData = async () => {
     ])
     accounts.value = acc; categories.value = cat; transactions.value = trans
     if (acc.length > 0 && !form.value.account_id) form.value.account_id = acc[0].id
-    setDefaultCategory()
+    if (!isTransactionEdit.value) setDefaultCategory()
   } catch (e) { console.error(e) }
+}
+
+const openCreateTransaction = () => {
+  isTransactionEdit.value = false; editTransactionId.value = null
+  form.value = { type: 'EXPENSE', date: form.value.date || new Date().toISOString().split('T')[0], amount: '', category: '', tag: '', note: '', account_id: accounts.value[0]?.id || '', target_account_id: '', fund_account_id: '' }
+  setDefaultCategory(); showRecordModal.value = true
+}
+
+const openEditTransaction = (t) => {
+  isTransactionEdit.value = true; editTransactionId.value = t.id
+  form.value = { type: t.type, date: t.date.split('T')[0], amount: t.amount, category: t.category, tag: t.tag||'', note: t.note||'', account_id: t.account_id, target_account_id: t.target_account_id||'', fund_account_id: '' }
+  showRecordModal.value = true
 }
 
 const submitTransaction = async () => {
   if (!form.value.amount || !form.value.account_id) return alert('请补全信息')
   if (form.value.type !== 'TRANSFER' && !form.value.category) return alert('请选择分类')
-  
   const payload = {
-    ...form.value,
-    date: new Date(form.value.date).toISOString(),
-    amount: Number(form.value.amount),
-    account_id: Number(form.value.account_id),
-    target_account_id: form.value.target_account_id ? Number(form.value.target_account_id) : null,
-    // [关键修复] 处理资金来源ID，空串转null
-    fund_account_id: (form.value.type === 'EXPENSE' && form.value.fund_account_id) ? Number(form.value.fund_account_id) : null,
-    category: form.value.type === 'TRANSFER' ? '转账' : form.value.category,
-    tag: form.value.tag || null
+    date: new Date(form.value.date).toISOString(), type: form.value.type, amount: Number(form.value.amount),
+    account_id: Number(form.value.account_id), target_account_id: form.value.target_account_id ? Number(form.value.target_account_id) : null,
+    category: form.value.type === 'TRANSFER' ? '转账' : form.value.category, tag: form.value.tag || null, note: form.value.note || null
   }
+  let url = '/api/transactions'; let method = 'POST'
+  if (isTransactionEdit.value) { url = `/api/transactions/${editTransactionId.value}`; method = 'PUT' }
+  else { payload.fund_account_id = (form.value.type === 'EXPENSE' && form.value.fund_account_id) ? Number(form.value.fund_account_id) : null }
   
-  const res = await fetch('/api/transactions', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) })
+  const res = await fetch(url, { method, headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) })
   if (res.ok) { 
-    form.value.amount = ''; form.value.note = ''; form.value.tag = ''; form.value.fund_account_id = '';
-    showRecordModal.value = false; await fetchData() 
+    await fetchData()
+    if (isContinuous.value && !isTransactionEdit.value) { form.value.amount=''; form.value.note=''; } 
+    else { showRecordModal.value = false }
   } else { alert('保存失败') }
 }
 
@@ -72,7 +81,7 @@ const submitAccount = async () => {
   await fetch(url, { method, headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) })
   showAccountModal.value = false; await fetchData()
 }
-const deleteAccount = async (id) => { if(confirm("删除账户会连带删除交易，确定？")) { await fetch(`/api/accounts/${id}`, { method: 'DELETE' }); if(selectedAccount.value?.id===id) selectedAccount.value=null; await fetchData() } }
+const deleteAccount = async (id) => { if(confirm("删除账户会连带删除交易？")) { await fetch(`/api/accounts/${id}`, { method: 'DELETE' }); if(selectedAccount.value?.id===id) selectedAccount.value=null; await fetchData() } }
 
 const openCategoryModal = (type, parentId = null, catToEdit = null) => {
   isCatEdit.value = !!catToEdit; editCatId.value = catToEdit?.id
@@ -86,9 +95,65 @@ const submitCategory = async () => {
   await fetch(url, { method, headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) })
   showCategoryModal.value = false; await fetchData()
 }
-const deleteCategory = async (id) => { if(confirm("确定删除该分类？")) { await fetch(`/api/categories/${id}`, { method: 'DELETE' }); await fetchData() } }
+const deleteCategory = async (id) => { if(confirm("删除分类？")) { await fetch(`/api/categories/${id}`, { method: 'DELETE' }); await fetchData() } }
 
-// --- 日期筛选逻辑 ---
+// --- 核心：信用卡账单计算 ---
+// 返回 { billed: '已出账金额(需还款)', unbilled: '未出账金额', dueDate: '还款日' }
+const getCardStats = (acc) => {
+  if (acc.type !== '信用卡' || !acc.billing_day) return null
+  
+  const now = new Date()
+  const todayDay = now.getDate()
+  let billDate = new Date(now.getFullYear(), now.getMonth(), acc.billing_day)
+  
+  // 如果今天还没到本月的账单日，说明上一期账单是上个月出的
+  if (todayDay < acc.billing_day) {
+    billDate.setMonth(billDate.getMonth() - 1)
+  }
+  // 此时 billDate 就是“最近一次出的账单日”
+
+  // 设定账单时间界限 (当天23:59:59)
+  billDate.setHours(23, 59, 59, 999)
+
+  let billed = acc.initial_balance // 初始余额通常算在已出账里
+  let unbilled = 0
+
+  transactions.value.forEach(t => {
+    // 必须是跟该账户有关的交易
+    if (t.account_id !== acc.id && t.target_account_id !== acc.id) return
+
+    const tDate = new Date(t.date)
+    let amount = 0
+    // 计算该笔交易对余额的影响（支出为负，收入/转入为正）
+    if (t.account_id === acc.id) amount -= t.amount // 转出或支出
+    if (t.target_account_id === acc.id) amount += t.amount // 转入或收入
+
+    if (tDate <= billDate) {
+      billed += amount
+    } else {
+      unbilled += amount
+    }
+  })
+
+  // 计算最近的还款日显示
+  let dueDisplay = '-'
+  if (acc.due_day) {
+    let dueDate = new Date(billDate) // 基于账单日推算
+    // 粗略算法：如果还款日数字 < 账单日，说明是下个月；否则可能是同一个月
+    // 更好的方式：通常还款日是账单日后20天左右
+    dueDate.setDate(acc.due_day)
+    if (dueDate < billDate) dueDate.setMonth(dueDate.getMonth() + 1)
+    dueDisplay = (dueDate.getMonth() + 1) + '.' + dueDate.getDate()
+  }
+
+  return {
+    billed: billed.toFixed(2),
+    unbilled: unbilled.toFixed(2),
+    dueDisplay
+  }
+}
+
+// --- 日期筛选 ---
 const shiftDate = (delta) => {
   const d = new Date(cursorDate.value)
   if (filterMode.value === 'YEAR') d.setFullYear(d.getFullYear() + delta)
@@ -135,7 +200,10 @@ const periodStats = computed(() => {
 })
 const assetStats = computed(() => { let a=0, l=0; accounts.value.forEach(acc => acc.balance >=0 ? a+=acc.balance : l+=acc.balance); return { assets: a.toFixed(2), liabilities: l.toFixed(2), netWorth: (a+l).toFixed(2) } })
 const groupedAccounts = computed(() => {
-  const groups = {}; accounts.value.forEach(acc => { if (!groups[acc.type]) groups[acc.type] = { name: acc.type, accounts: [], total: 0 }; groups[acc.type].accounts.push(acc); groups[acc.type].total += acc.balance })
+  const groups = {}; accounts.value.forEach(acc => { 
+    if (!groups[acc.type]) groups[acc.type] = { name: acc.type, accounts: [], total: 0 }; 
+    groups[acc.type].accounts.push(acc); groups[acc.type].total += acc.balance 
+  })
   return groups
 })
 const buildTree = (type) => {
@@ -151,8 +219,8 @@ const flattenOptions = (tree, level = 0) => {
 }
 const availableCategoryOptions = computed(() => flattenOptions(form.value.type === 'EXPENSE' ? expenseTree.value : incomeTree.value))
 const parentCategoryOptions = computed(() => categories.value.filter(c => c.type === categoryForm.value.type && !c.parent_id && c.id !== editCatId.value))
-const setDefaultCategory = () => { const opts = availableCategoryOptions.value; form.value.category = opts.length > 0 ? opts[0].name : '' }
-const onTypeChange = () => setDefaultCategory()
+const setDefaultCategory = () => { if (form.value.category) return; const opts = availableCategoryOptions.value; form.value.category = opts.length > 0 ? opts[0].name : '' }
+const onTypeChange = () => { form.value.category = ''; setDefaultCategory() }
 
 onMounted(fetchData)
 </script>
@@ -162,22 +230,46 @@ onMounted(fetchData)
     <div class="sidebar">
       <div class="logo-area"><span class="logo-icon">💰</span> <span style="font-weight: bold;">我的账本</span></div>
       <div class="nav-item" :class="{active: activeView==='transactions' && !selectedAccount}" @click="activeView='transactions'; selectedAccount=null"><span class="icon">📂</span> 所有交易</div>
+      
       <div class="account-group" v-for="(group, type) in groupedAccounts" :key="type">
         <div class="group-header"><span>{{ type }}</span><span>¥{{ group.total.toFixed(2) }}</span></div>
-        <div class="nav-item sub-item" v-for="acc in group.accounts" :key="acc.id" :class="{active: selectedAccount?.id===acc.id}" @click="activeView='transactions'; selectedAccount=acc">
-          <span class="acc-name">{{ acc.name }}</span><span class="acc-balance" :class="{'text-red': acc.balance<0}">{{ acc.balance.toFixed(2) }}</span>
+        
+        <div class="nav-item sub-item" v-for="acc in group.accounts" :key="acc.id" 
+             :class="{active: selectedAccount?.id===acc.id, 'card-item': acc.type==='信用卡'}" 
+             @click="activeView='transactions'; selectedAccount=acc">
+          
+          <div v-if="acc.type !== '信用卡'" style="display:flex;justify-content:space-between;width:100%">
+            <span class="acc-name">{{ acc.name }}</span>
+            <span class="acc-balance" :class="{'text-green': acc.balance<0}">{{ acc.balance.toFixed(2) }}</span>
+          </div>
+
+          <div v-else style="display:flex;flex-direction:column;width:100%">
+            <div style="display:flex;justify-content:space-between;">
+              <span class="acc-name">{{ acc.name }}</span>
+              <span class="acc-balance" :class="{'text-green': acc.balance<0}">{{ acc.balance.toFixed(2) }}</span>
+            </div>
+            <div v-if="getCardStats(acc)" class="card-stats">
+              <div class="bill-row">
+                <span>应还: <span class="text-green">{{ getCardStats(acc).billed }}</span></span>
+                <span class="due-date" v-if="acc.due_day">({{ getCardStats(acc).dueDisplay }})</span>
+              </div>
+              <div class="unbilled">未出: {{ getCardStats(acc).unbilled }}</div>
+            </div>
+          </div>
+
         </div>
       </div>
       <div class="spacer"></div>
       <div class="nav-item settings-btn" :class="{active: activeView==='settings'}" @click="activeView='settings'"><span class="icon">⚙️</span> 设置中心</div>
     </div>
+
     <div class="main-content">
       <div v-if="activeView === 'transactions'" class="view-container">
         <div class="top-stats">
           <div class="stat-item"><div class="stat-label">净资产</div><div class="stat-value text-blue">{{ assetStats.netWorth }}</div></div>
-          <div class="stat-item"><div class="stat-label">总资产</div><div class="stat-value text-green">{{ assetStats.assets }}</div></div>
-          <div class="stat-item"><div class="stat-label">总负债</div><div class="stat-value text-red">{{ assetStats.liabilities }}</div></div>
-          <div style="flex:1"></div><button class="btn-record" @click="showRecordModal=true">✏️ 记一笔</button>
+          <div class="stat-item"><div class="stat-label">总资产</div><div class="stat-value text-red">{{ assetStats.assets }}</div></div>
+          <div class="stat-item"><div class="stat-label">总负债</div><div class="stat-value text-green">{{ assetStats.liabilities }}</div></div>
+          <div style="flex:1"></div><button class="btn-record" @click="openCreateTransaction">✏️ 记一笔</button>
         </div>
         <div class="table-container">
           <div class="filter-bar">
@@ -188,16 +280,16 @@ onMounted(fetchData)
             </div>
           </div>
           <table>
-            <thead><tr><th width="120">日期</th><th>分类</th><th class="text-right">流入</th><th class="text-right">流出</th><th>账户</th><th>备注/标签</th><th width="50"></th></tr></thead>
+            <thead><tr><th width="120">日期</th><th>分类</th><th class="text-right">流入(收)</th><th class="text-right">流出(支)</th><th>账户</th><th>备注/标签</th><th width="80">操作</th></tr></thead>
             <tbody>
               <tr v-for="t in filteredTransactions" :key="t.id">
                 <td class="text-gray">{{ t.date.split('T')[0] }}</td>
                 <td>{{ t.type==='TRANSFER'?'转账':t.category }}</td>
-                <td class="text-right text-green"><span v-if="t.type==='INCOME'||(t.type==='TRANSFER'&&t.target_account_id===selectedAccount?.id)">+{{ t.amount }}</span></td>
-                <td class="text-right text-red"><span v-if="t.type==='EXPENSE'||(t.type==='TRANSFER'&&(!selectedAccount||t.account_id===selectedAccount?.id))">-{{ t.amount }}</span></td>
+                <td class="text-right text-red"><span v-if="t.type==='INCOME'||(t.type==='TRANSFER'&&t.target_account_id===selectedAccount?.id)">+{{ t.amount }}</span></td>
+                <td class="text-right text-green"><span v-if="t.type==='EXPENSE'||(t.type==='TRANSFER'&&(!selectedAccount||t.account_id===selectedAccount?.id))">-{{ t.amount }}</span></td>
                 <td class="text-gray">{{ t.type==='TRANSFER'?`${t.account_name} ➜ ${t.target_account_name}`:t.account_name }}</td>
                 <td class="text-gray"><span v-if="t.tag" class="tag-badge">{{ t.tag }}</span>{{ t.note }}</td>
-                <td><button class="btn-icon" @click="deleteTransaction(t.id)">🗑</button></td>
+                <td><button class="btn-icon" @click="openEditTransaction(t)" title="编辑">✎</button><button class="btn-icon" @click="deleteTransaction(t.id)" title="删除">🗑</button></td>
               </tr>
             </tbody>
           </table>
@@ -216,10 +308,15 @@ onMounted(fetchData)
         <div v-if="settingsTab === 'accounts'" class="settings-panel"><div class="settings-inner">
           <div class="panel-header"><h3>所有账户</h3><button class="btn-sm primary" @click="openAccountModal(null)">+ 新建账户</button></div>
           <div class="account-list">
-            <div class="account-row header"><span>名称</span><span>类型</span><span class="text-right">余额</span><span class="text-right">操作</span></div>
+            <div class="account-row header"><span>名称</span><span>类型</span><span class="text-right">当前余额</span><span class="text-right">应还(已出账)</span><span class="text-right">操作</span></div>
             <div class="account-row" v-for="acc in accounts" :key="acc.id">
               <div style="display:flex;flex-direction:column;flex:1"><span style="font-weight:500">{{ acc.name }}</span><span v-if="acc.type==='信用卡'" style="font-size:0.8em;color:#999">账单日:{{ acc.billing_day||'-' }} / 还款日:{{ acc.due_day||'-' }}</span></div>
-              <span style="flex:1"><span class="badge">{{ acc.type }}</span></span><span class="text-right bold" style="flex:1">{{ acc.balance }}</span>
+              <span style="flex:1"><span class="badge">{{ acc.type }}</span></span>
+              <span class="text-right bold" style="flex:1" :class="{'text-green': acc.balance<0}">{{ acc.balance }}</span>
+              <span class="text-right" style="flex:1; font-size:0.9em; color:#666">
+                <span v-if="getCardStats(acc)" class="text-green">{{ getCardStats(acc).billed }}</span>
+                <span v-else>-</span>
+              </span>
               <div class="text-right action-btns" style="flex:1"><button class="btn-sm" @click="openAccountModal(acc)">编辑</button><button class="btn-sm danger" @click="deleteAccount(acc.id)">删除</button></div>
             </div>
           </div>
@@ -240,20 +337,23 @@ onMounted(fetchData)
     </div>
     
     <div class="modal-overlay" v-if="showRecordModal" @click.self="showRecordModal=false"><div class="modal-card">
-      <h3>📝 记一笔</h3>
+      <h3>{{ isTransactionEdit ? '✏️ 编辑交易' : '📝 记一笔' }}</h3>
       <div class="type-tabs"><label :class="{active: form.type==='EXPENSE'}"><input type="radio" value="EXPENSE" v-model="form.type" @change="onTypeChange" hidden> 支出</label><label :class="{active: form.type==='INCOME'}"><input type="radio" value="INCOME" v-model="form.type" @change="onTypeChange" hidden> 收入</label><label :class="{active: form.type==='TRANSFER'}"><input type="radio" value="TRANSFER" v-model="form.type" hidden> 转账</label></div>
       <div class="modal-form">
         <div class="row"><input type="date" v-model="form.date"><input type="number" v-model="form.amount" placeholder="金额"></div>
         <div class="row">
           <div style="flex:1;display:flex;flex-direction:column"><select v-model="form.account_id"><option value="" disabled>{{form.type==='TRANSFER'?'转出账户':'记账账户'}}</option><option v-for="acc in accounts" :key="acc.id" :value="acc.id">{{ acc.name }}</option></select></div>
           <div v-if="form.type==='TRANSFER'" style="flex:1"><select v-model="form.target_account_id"><option value="" disabled>转入账户</option><option v-for="acc in accounts" :key="acc.id" :value="acc.id">{{ acc.name }}</option></select></div>
-          <div v-if="form.type==='EXPENSE'" style="flex:1"><select v-model="form.fund_account_id" style="color:#2c3e50;border-color:#3498db"><option value="">默认 (余额支付)</option><optgroup label="实际扣款账户"><option v-for="acc in accounts.filter(a=>a.id!==form.account_id)" :key="acc.id" :value="acc.id">扣: {{ acc.name }}</option></optgroup></select></div>
+          <div v-if="form.type==='EXPENSE' && !isTransactionEdit" style="flex:1"><select v-model="form.fund_account_id" style="color:#2c3e50;border-color:#3498db"><option value="">默认 (余额支付)</option><optgroup label="实际扣款账户"><option v-for="acc in accounts.filter(a=>a.id!==form.account_id)" :key="acc.id" :value="acc.id">扣: {{ acc.name }}</option></optgroup></select></div>
         </div>
         <div v-if="form.type!=='TRANSFER'" class="row"><select v-model="form.category"><option value="" disabled>选择分类</option><option v-for="opt in availableCategoryOptions" :key="opt.id" :value="opt.name" v-html="opt.label"></option></select></div>
         <div class="row tag-row" style="margin-top:10px"><label style="margin-right:10px;font-size:0.9em;color:#666">标签:</label><div class="tags-wrapper"><span v-for="tag in commonTags" :key="tag" class="tag-chip" :class="{active: form.tag===tag}" @click="toggleTag(tag)">{{ tag }}</span></div></div>
         <input v-model="form.note" placeholder="备注..." style="width:100%;margin-top:10px">
       </div>
-      <div class="modal-actions"><button class="btn-modal btn-cancel" @click="showRecordModal=false">取消</button><button class="btn-modal btn-save" @click="submitTransaction">保存记录</button></div>
+      <div class="modal-actions">
+        <div v-if="!isTransactionEdit" style="margin-right: auto; display: flex; align-items: center;"><label style="cursor: pointer; display: flex; align-items: center; gap: 5px; color: #555; font-size: 14px;"><input type="checkbox" v-model="isContinuous"> 连续记录</label></div>
+        <button class="btn-modal btn-cancel" @click="showRecordModal=false">取消</button><button class="btn-modal btn-save" @click="submitTransaction">保存记录</button>
+      </div>
     </div></div>
 
     <div class="modal-overlay" v-if="showAccountModal" @click.self="showAccountModal=false"><div class="modal-card">
@@ -272,7 +372,15 @@ onMounted(fetchData)
 </template>
 
 <style>
-/* CSS */
+/* ... (样式保持不变，只需增加 card-stats 样式) ... */
+/* 复制之前的 CSS，并添加以下针对信用卡的样式 */
+.card-item { padding-bottom: 10px; }
+.card-stats { margin-top: 5px; font-size: 12px; background: #fdfdfd; padding: 6px; border-radius: 4px; border: 1px solid #eee; }
+.bill-row { display: flex; justify-content: space-between; margin-bottom: 2px; }
+.unbilled { color: #999; }
+.due-date { color: #999; font-size: 0.9em; margin-left: 5px; }
+
+/* 基础 CSS (为确保完整性再次列出关键部分) */
 body { margin: 0; font-family: -apple-system, sans-serif; background-color: #f0f0f0; color: #333; }
 .app-layout { display: flex; height: 100vh; width: 100vw; }
 .sidebar { width: 240px; background: #f7f7f7; border-right: 1px solid #ddd; display: flex; flex-direction: column; }
@@ -289,7 +397,9 @@ body { margin: 0; font-family: -apple-system, sans-serif; background-color: #f0f
 .date-label { min-width: 100px; text-align: center; font-weight: 500; }
 .table-footer { padding: 10px 15px; background: #fafafa; border-top: 2px solid #eee; display: flex; gap: 15px; font-size: 13px; font-weight: bold; align-items: center; }
 .stat-pill { padding: 3px 8px; border-radius: 4px; }
-.stat-pill.income { background: #eafaf1; color: #27ae60; } .stat-pill.expense { background: #fdedec; color: #e74c3c; } .stat-pill.balance { background: #ebf5fb; color: #3498db; }
+.stat-pill.income { background: #fdedec; color: #e74c3c; } 
+.stat-pill.expense { background: #eafaf1; color: #27ae60; } 
+.stat-pill.balance { background: #ebf5fb; color: #3498db; }
 .top-stats { height: 80px; padding: 0 30px; border-bottom: 1px solid #eee; display: flex; align-items: center; gap: 40px; background: #fafafa; }
 .stat-item { display: flex; flex-direction: column; gap: 5px; }
 .stat-label { font-size: 12px; color: #888; }
@@ -309,7 +419,7 @@ body { margin: 0; font-family: -apple-system, sans-serif; background-color: #f0f
 .category-tree { display: flex; flex-direction: column; gap: 10px; }
 .tree-node { background: white; border: 1px solid #eee; border-radius: 8px; overflow: hidden; }
 .node-content { display: flex; justify-content: space-between; align-items: center; padding: 10px 15px; }
-.node-content.parent { background: #fbfbfb; font-weight: 500; } .node-content.parent.income { border-left: 4px solid #27ae60; } .node-content.parent:not(.income) { border-left: 4px solid #c0392b; }
+.node-content.parent { background: #fbfbfb; font-weight: 500; } .node-content.parent.income { border-left: 4px solid #e74c3c; } .node-content.parent:not(.income) { border-left: 4px solid #27ae60; }
 .node-content.child { border-top: 1px solid #f5f5f5; padding-left: 30px; font-size: 0.95em; color: #666; }
 .node-actions { display: flex; gap: 10px; opacity: 0; transition: opacity 0.2s; } .node-content:hover .node-actions { opacity: 1; }
 .btn-text { background: none; border: none; color: #3498db; cursor: pointer; font-size: 12px; padding: 0; } .btn-text.danger { color: #e74c3c; }
@@ -332,6 +442,7 @@ body { margin: 0; font-family: -apple-system, sans-serif; background-color: #f0f
 .nav-item.sub-item { padding-left: 45px; justify-content: space-between; font-size: 13px; }
 .group-header { padding: 5px 20px; font-size: 12px; color: #999; display: flex; justify-content: space-between; margin-top: 10px; }
 .text-right { text-align: right; } .text-red { color: #e74c3c; } .text-green { color: #27ae60; } .text-blue { color: #3498db; } .text-gray { color: #999; } .spacer { flex: 1; }
+.btn-record { padding: 8px 20px; background: #3498db; color: white; border: none; border-radius: 20px; cursor: pointer; }
 table { width: 100%; border-collapse: collapse; font-size: 13px; } th { text-align: left; padding: 10px; border-bottom: 1px solid #eee; color: #888; } td { padding: 12px 10px; border-bottom: 1px solid #f5f5f5; }
 .btn-icon { border: none; background: none; opacity: 0.3; cursor: pointer; } .btn-icon:hover { opacity: 1; color: red; }
 .empty-state { text-align: center; padding: 40px; color: #999; }
