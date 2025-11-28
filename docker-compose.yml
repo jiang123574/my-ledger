@@ -1,0 +1,27 @@
+version: '3.8'
+
+services:
+  backend:
+    build: 
+      context: ./backend
+      # 即使是在 M4 上，也可以显式声明构建，Docker 会自动使用 arm64 架构
+    container_name: ledger_backend
+    volumes:
+      - ./backend/data:/app/data
+    expose:
+      - "8000"
+    environment:
+      # SQLite 在 Docker 卷挂载中可能会遇到文件锁问题，
+      # 如果你在日志中看到 "database is locked"，请尝试下面的 WAL 模式优化
+      - DATABASE_URL=sqlite:///./data/ledger.db
+      - SQLITE_JOURNAL_MODE=WAL
+
+  frontend:
+    build: ./frontend
+    container_name: ledger_frontend
+    ports:
+      # 将容器的 80 端口映射到宿主机的 8080 端口
+      # 访问地址: http://localhost:8080
+      - "8080:80"
+    depends_on:
+      - backend
