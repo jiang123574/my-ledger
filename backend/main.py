@@ -10,7 +10,6 @@ from typing import Optional, List
 import os
 
 # --- 1. 数据库基础配置 ---
-# 自动创建数据目录，防止 Docker 挂载权限问题
 if not os.path.exists("./data"):
     try:
         os.makedirs("./data")
@@ -71,7 +70,7 @@ class Transaction(Base):
     type = Column(String) # EXPENSE, INCOME, TRANSFER
     amount = Column(Float)
     category = Column(String)
-    tag = Column(String, nullable=True) # 标签
+    tag = Column(String, nullable=True)
     note = Column(String, nullable=True)
     account_id = Column(Integer, ForeignKey("accounts.id", ondelete="CASCADE"))
     target_account_id = Column(Integer, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=True)
@@ -107,7 +106,7 @@ class TransactionCreate(BaseModel):
     note: Optional[str] = None; 
     account_id: int; 
     target_account_id: Optional[int] = None
-    fund_account_id: Optional[int] = None # 资金来源账户 (仅用于逻辑处理，不存入DB)
+    fund_account_id: Optional[int] = None # 辅助字段，不存数据库
 
 class TransactionOut(TransactionCreate):
     id: int; account_name: str; target_account_name: Optional[str] = None
@@ -115,16 +114,13 @@ class TransactionOut(TransactionCreate):
 
 # --- 4. 初始化逻辑 ---
 def init_db_data():
-    """初始化数据库表和默认数据"""
-    print("🔄 开始检查数据库初始化...")
+    print("🔄 检查数据库初始化...")
     try:
         Base.metadata.create_all(bind=engine)
-        print("✅ 数据库表结构已确认")
-
         db = SessionLocal()
         count = db.query(Category).count()
         if count == 0:
-            print("📦 数据库为空，正在写入默认分类...")
+            print("📦 写入默认分类...")
             data = [
                 {"name": "餐饮", "type": "EXPENSE", "children": ["早餐", "午餐", "晚餐", "饮料", "零食"]},
                 {"name": "交通", "type": "EXPENSE", "children": ["地铁", "公交", "打车", "加油", "停车"]},
@@ -141,12 +137,9 @@ def init_db_data():
                 for child_name in item["children"]:
                     db.add(Category(name=child_name, type=item["type"], parent_id=parent.id))
             db.commit()
-            print("✅ 默认分类写入完成")
-        else:
-            print(f"✅ 数据库已有 {count} 条分类数据，跳过初始化")
         db.close()
     except Exception as e:
-        print(f"❌ 数据库初始化失败: {e}")
+        print(f"❌ 初始化失败: {e}")
 
 # --- 5. FastAPI 生命周期 ---
 @asynccontextmanager
@@ -232,14 +225,20 @@ def create_transaction(item: TransactionCreate, db: Session = Depends(get_db)):
             note=f"自动转账 (用于: {item.category})"
         )
         db.add(transfer_item)
-        # 不立即 commit，与下面一起提交
 
-    # 插入主要交易
+    # 逻辑 C: 创建主要交易记录
+    # [关键修复]：必须显式指定字段，排除 fund_account_id，否则 SQLAlchemy 报错
     db_item = Transaction(
-        date=item.date, type=item.type, amount=item.amount,
-        category=item.category, tag=item.tag, note=item.note,
-        account_id=item.account_id, target_account_id=item.target_account_id
+        date=item.date,
+        type=item.type,
+        amount=item.amount,
+        category=item.category,
+        tag=item.tag,
+        note=item.note,
+        account_id=item.account_id,
+        target_account_id=item.target_account_id
     )
+    
     db.add(db_item)
     db.commit()
     db.refresh(db_item)
