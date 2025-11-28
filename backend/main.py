@@ -74,3 +74,20 @@ def create_transaction(item: TransactionCreate, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(db_item)
     return db_item
+
+
+# 新增：删除交易的接口
+@app.delete("/api/transactions/{transaction_id}")
+def delete_transaction(transaction_id: int, db: Session = Depends(get_db)):
+    # 1. 在数据库中查找对应的记录
+    transaction = db.query(Transaction).filter(Transaction.id == transaction_id).first()
+    
+    # 2. 如果找不到，返回 404 错误
+    if transaction is None:
+        raise HTTPException(status_code=404, detail="未找到该记录")
+    
+    # 3. 删除并提交更改
+    db.delete(transaction)
+    db.commit()
+    
+    return {"message": "删除成功"}
