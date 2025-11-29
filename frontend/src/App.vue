@@ -42,8 +42,10 @@ const fetchData = async () => {
 const openCreateTransaction = () => {
   isTransactionEdit.value = false
   editTransactionId.value = null
-  // 重置表单，保留日期
-  const today = new Date().toISOString().split('T')[0]
+  // 重置表单，保留日期。注意：简单的 toISOString 会取 UTC 时间，这里简单修复为本地日期字符串
+  const now = new Date();
+  const today = new Date(now.getTime() - (now.getTimezoneOffset() * 60000)).toISOString().split('T')[0];
+  
   form.value = { 
     type: 'EXPENSE', 
     date: today, 
@@ -72,7 +74,7 @@ const openEditTransaction = (t) => {
     note: t.note || '',
     account_id: t.account_id,
     target_account_id: t.target_account_id || '',
-    fund_account_id: '' // 编辑模式不回填资金来源
+    fund_account_id: '' 
   }
   showRecordModal.value = true
 }
@@ -99,7 +101,6 @@ const submitTransaction = async () => {
     url = `/api/transactions/${editTransactionId.value}`
     method = 'PUT'
   } else {
-    // 新增模式：处理资金来源ID，空串转null
     payload.fund_account_id = (form.value.type === 'EXPENSE' && form.value.fund_account_id) ? Number(form.value.fund_account_id) : null
   }
   
@@ -206,6 +207,54 @@ const parentCategoryOptions = computed(() => categories.value.filter(c => c.type
 const setDefaultCategory = () => { const opts = availableCategoryOptions.value; form.value.category = opts.length > 0 ? opts[0].name : '' }
 const onTypeChange = () => setDefaultCategory()
 
+// --- 信用卡账单计算逻辑 (新增) ---
+const creditStatsMap = computed(() => {
+  const map = {}
+  accounts.value.forEach(acc => {
+    if (acc.type === '信用卡' && acc.billing_day) {
+      const now = new Date()
+      // 计算最近的账单日
+      let billingYear = now.getFullYear()
+      let billingMonth = now.getMonth() // 0-11
+      const day = acc.billing_day
+      
+      // 如果今天日期 < 账单日，说明本月账单未出，截止点是上个月的账单日
+      if (now.getDate() < day) {
+        billingMonth--
+      }
+      
+      // 账单截止时间
+      const billingDate = new Date(billingYear, billingMonth, day, 23, 59, 59, 999)
+      
+      let statement = acc.initial_balance || 0
+      let unbilled = 0
+      
+      // 遍历所有相关交易
+      transactions.value.forEach(t => {
+        if (t.account_id !== acc.id && t.target_account_id !== acc.id) return
+        
+        const tDate = new Date(t.date)
+        let amount = 0
+        
+        // 计算每一笔交易对余额的影响（信用卡余额通常为负）
+        if (t.type === 'INCOME' && t.account_id === acc.id) amount = t.amount
+        else if (t.type === 'EXPENSE' && t.account_id === acc.id) amount = -t.amount
+        else if (t.type === 'TRANSFER') {
+          if (t.account_id === acc.id) amount = -t.amount
+          if (t.target_account_id === acc.id) amount = t.amount
+        }
+        
+        if (tDate <= billingDate) statement += amount
+        else unbilled += amount
+      })
+      
+      // 取反：用户习惯看“应还 100”，而不是“-100”
+      map[acc.id] = { statement: -statement, unbilled: -unbilled }
+    }
+  })
+  return map
+})
+
 onMounted(fetchData)
 </script>
 
@@ -217,8 +266,22 @@ onMounted(fetchData)
       <div class="account-group" v-for="(group, type) in groupedAccounts" :key="type">
         <div class="group-header"><span>{{ type }}</span><span>¥{{ group.total.toFixed(2) }}</span></div>
         <div class="nav-item sub-item" v-for="acc in group.accounts" :key="acc.id" :class="{active: selectedAccount?.id===acc.id}" @click="activeView='transactions'; selectedAccount=acc">
-          <span class="acc-name">{{ acc.name }}</span>
-          <span class="acc-balance" :class="{'text-green': acc.balance<0}">{{ acc.balance.toFixed(2) }}</span>
+          <div style="flex: 1;">
+            <div class="acc-row-main">
+              <span class="acc-name">{{ acc.name }}</span>
+              <span class="acc-balance" :class="{'text-green': acc.balance<0}">{{ acc.balance.toFixed(2) }}</span>
+            </div>
+            <div v-if="acc.type==='信用卡' && creditStatsMap[acc.id]" class="credit-details">
+              <div class="cd-row">
+                <span>本期应还:</span>
+                <span :class="{'text-warn': creditStatsMap[acc.id].statement > 0}">{{ creditStatsMap[acc.id].statement.toFixed(2) }}</span>
+              </div>
+              <div class="cd-row">
+                <span>未出账单:</span>
+                <span>{{ creditStatsMap[acc.id].unbilled.toFixed(2) }}</span>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
       <div class="spacer"></div>
@@ -394,7 +457,13 @@ body { margin: 0; font-family: -apple-system, sans-serif; background-color: #f0f
 .tag-chip { background: #f0f0f0; color: #666; padding: 4px 12px; border-radius: 20px; font-size: 12px; cursor: pointer; border: 1px solid transparent; } .tag-chip:hover { background: #e0e0e0; } .tag-chip.active { background: #e8f4fc; color: #3498db; border-color: #3498db; font-weight: bold; }
 .tag-badge { background: #e8f4fc; color: #3498db; padding: 2px 6px; border-radius: 4px; font-size: 11px; margin-right: 5px; border: 1px solid #d6eaf8; }
 .nav-item { padding: 10px 20px; cursor: pointer; display: flex; align-items: center; gap: 10px; color: #555; } .nav-item:hover { background: #eaeaea; } .nav-item.active { background: #e0e0e0; color: #000; font-weight: 500; border-left: 3px solid #3498db; }
-.nav-item.sub-item { padding-left: 45px; justify-content: space-between; font-size: 13px; }
+/* 优化侧边栏样式 */
+.nav-item.sub-item { padding-left: 45px; flex-direction: column; align-items: flex-start; gap: 0; padding-top: 8px; padding-bottom: 8px; }
+.acc-row-main { display: flex; justify-content: space-between; width: 100%; align-items: center; }
+.credit-details { background: #fff; margin-top: 6px; padding: 6px 10px; border-radius: 6px; border: 1px solid #eee; width: 100%; box-sizing: border-box; }
+.cd-row { display: flex; justify-content: space-between; font-size: 11px; color: #7f8c8d; margin-bottom: 2px; } .cd-row:last-child { margin-bottom: 0; }
+.text-warn { color: #e67e22; font-weight: bold; }
+
 .group-header { padding: 5px 20px; font-size: 12px; color: #999; display: flex; justify-content: space-between; margin-top: 10px; }
 .text-right { text-align: right; } .text-red { color: #e74c3c; } .text-green { color: #27ae60; } .text-blue { color: #3498db; } .text-gray { color: #999; } .spacer { flex: 1; }
 .btn-record { padding: 8px 20px; background: #3498db; color: white; border: none; border-radius: 20px; cursor: pointer; }
