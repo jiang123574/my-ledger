@@ -4,7 +4,7 @@
 
 所有代码均为AI生成
 
+3小时达成效果展示
 
-![效果展示][def]
+![效果展示][https://github.com/jiang123574/my-ledger/blob/main/images/PixPin_2025-11-28_20-15-42.png]
 
-[def]: ./PixPin_2025-11-28_20-15-42.png
