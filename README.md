@@ -6,5 +6,5 @@
 
 3小时达成效果展示
 
-![效果展示][https://github.com/jiang123574/my-ledger/blob/main/images/PixPin_2025-11-28_20-15-42.png]
+![效果展示](https://github.com/jiang123574/my-ledger/blob/main/images/PixPin_2025-11-28_20-15-42.png)
 
