@@ -62,9 +62,8 @@ class Transaction(Base):
     note = Column(String, nullable=True)
     account_id = Column(Integer, ForeignKey("accounts.id", ondelete="CASCADE"))
     target_account_id = Column(Integer, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=True)
-    link_id = Column(Integer, ForeignKey("transactions.id", ondelete="CASCADE"), nullable=True)
     
-    # [新增] 排序字段，默认为 0
+    link_id = Column(Integer, ForeignKey("transactions.id", ondelete="CASCADE"), nullable=True)
     sort_order = Column(Integer, default=0)
 
     account = relationship("Account", foreign_keys=[account_id], back_populates="sent_transactions", lazy='joined')
@@ -105,45 +104,39 @@ class TransactionUpdate(BaseModel):
 
 class TransactionOut(TransactionCreate):
     id: int; account_name: str; target_account_name: Optional[str] = None; link_id: Optional[int] = None; 
-    sort_order: int # 返回排序字段
+    sort_order: int
     model_config = ConfigDict(from_attributes=True)
 
-# [新增] 批量排序请求模型
 class SortItem(BaseModel):
-    id: int
-    sort_order: int
+    id: int; sort_order: int
 
 # --- 4. 初始化与迁移 ---
 def check_and_migrate_db():
-    """检查数据库结构并自动迁移"""
+    """自动给旧数据库添加新字段，防止报错"""
     print("🔄 检查数据库结构...")
     Base.metadata.create_all(bind=engine)
-    
-    # 简单的迁移逻辑：检查 transactions 表是否有 sort_order 字段
     with engine.connect() as conn:
         try:
-            # 尝试查询 sort_order，如果报错说明字段不存在
-            conn.execute(text("SELECT sort_order FROM transactions LIMIT 1"))
-        except Exception:
-            print("⚠️ 检测到缺少 sort_order 字段，正在自动添加...")
+            # 1. 检查 sort_order
             try:
+                conn.execute(text("SELECT sort_order FROM transactions LIMIT 1"))
+            except Exception:
+                print("⚠️ 检测到缺少 sort_order 字段，正在自动添加...")
                 conn.execute(text("ALTER TABLE transactions ADD COLUMN sort_order INTEGER DEFAULT 0"))
-                conn.commit()
                 print("✅ 字段 sort_order 添加成功")
-            except Exception as e:
-                print(f"❌ 自动迁移失败: {e}")
 
-# --- 5. FastAPI 配置 ---
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    check_and_migrate_db()
-    init_default_data()
-    yield
-
-app = FastAPI(lifespan=lifespan)
-
-def get_db():
-    db = SessionLocal(); try: yield db; finally: db.close()
+            # 2. 检查 link_id
+            try:
+                conn.execute(text("SELECT link_id FROM transactions LIMIT 1"))
+            except Exception:
+                print("⚠️ 检测到缺少 link_id 字段，正在自动添加...")
+                # SQLite 的 ALTER TABLE 限制较多，先添加普通列以保证运行
+                conn.execute(text("ALTER TABLE transactions ADD COLUMN link_id INTEGER"))
+                print("✅ 字段 link_id 添加成功")
+            
+            conn.commit()
+        except Exception as e:
+            print(f"❌ 自动迁移失败: {e}")
 
 def init_default_data():
     db = SessionLocal()
@@ -164,44 +157,98 @@ def init_default_data():
         db.commit()
     db.close()
 
+# --- 5. FastAPI 配置 ---
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    check_and_migrate_db()
+    init_default_data()
+    yield
+
+app = FastAPI(lifespan=lifespan)
+
+# [修复] get_db 不能写在一行，必须分行写
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
 # --- 6. API 接口 ---
 
-# Categories & Accounts (保持不变，省略具体实现以节省篇幅，功能与之前一致)
 @app.get("/api/categories", response_model=List[CategoryOut])
-def read_categories(db: Session = Depends(get_db)): return db.query(Category).all()
+def read_categories(db: Session = Depends(get_db)):
+    return db.query(Category).all()
+
 @app.post("/api/categories", response_model=CategoryOut)
-def create_category(c: CategoryCreate, db: Session = Depends(get_db)): o=Category(name=c.name,type=c.type,parent_id=c.parent_id); db.add(o); db.commit(); db.refresh(o); return o
+def create_category(c: CategoryCreate, db: Session = Depends(get_db)):
+    o = Category(name=c.name, type=c.type, parent_id=c.parent_id)
+    db.add(o)
+    db.commit()
+    db.refresh(o)
+    return o
+
 @app.put("/api/categories/{id}", response_model=CategoryOut)
-def update_category(id: int, c: CategoryUpdate, db: Session = Depends(get_db)): o=db.query(Category).filter(Category.id==id).first(); o.name=c.name; o.type=c.type; o.parent_id=c.parent_id; db.commit(); db.refresh(o); return o
+def update_category(id: int, c: CategoryUpdate, db: Session = Depends(get_db)):
+    o = db.query(Category).filter(Category.id == id).first()
+    if not o: raise HTTPException(404)
+    o.name = c.name
+    o.type = c.type
+    o.parent_id = c.parent_id
+    db.commit()
+    db.refresh(o)
+    return o
+
 @app.delete("/api/categories/{id}")
-def delete_category(id: int, db: Session = Depends(get_db)): db.query(Category).filter(Category.id==id).delete(); db.commit(); return {"ok":True}
+def delete_category(id: int, db: Session = Depends(get_db)):
+    db.query(Category).filter(Category.id == id).delete()
+    db.commit()
+    return {"ok": True}
 
 @app.get("/api/accounts", response_model=List[AccountOut])
 def read_accounts(db: Session = Depends(get_db)):
-    # 聚合计算余额 (保持之前的优化)
     accounts = db.query(Account).all()
     from_stats = db.query(Transaction.account_id, Transaction.type, func.sum(Transaction.amount)).group_by(Transaction.account_id, Transaction.type).all()
     to_stats = db.query(Transaction.target_account_id, func.sum(Transaction.amount)).filter(Transaction.type=='TRANSFER').group_by(Transaction.target_account_id).all()
+    
     b_map = {a.id: a.initial_balance for a in accounts}
     for aid, t, amt in from_stats:
         if aid: b_map[aid] += amt if t=='INCOME' else -amt
     for aid, amt in to_stats:
         if aid: b_map[aid] += amt
+        
     for a in accounts: a.balance = b_map.get(a.id, 0)
     return accounts
-@app.post("/api/accounts", response_model=AccountOut)
-def create_account(a: AccountCreate, db: Session = Depends(get_db)): o=Account(**a.model_dump()); db.add(o); db.commit(); db.refresh(o); o.balance=o.initial_balance; return o
-@app.put("/api/accounts/{id}", response_model=AccountOut)
-def update_account(id: int, a: AccountUpdate, db: Session = Depends(get_db)): o=db.query(Account).filter(Account.id==id).first(); [setattr(o,k,v) for k,v in a.model_dump().items()]; db.commit(); db.refresh(o); o.balance=o.initial_balance; return o
-@app.delete("/api/accounts/{id}")
-def delete_account(id: int, db: Session = Depends(get_db)): db.query(Account).filter(Account.id==id).delete(); db.commit(); return {"ok":True}
 
-# === Transactions (修改排序逻辑) ===
+@app.post("/api/accounts", response_model=AccountOut)
+def create_account(a: AccountCreate, db: Session = Depends(get_db)):
+    o = Account(**a.model_dump())
+    db.add(o)
+    db.commit()
+    db.refresh(o)
+    o.balance = o.initial_balance
+    return o
+
+@app.put("/api/accounts/{id}", response_model=AccountOut)
+def update_account(id: int, a: AccountUpdate, db: Session = Depends(get_db)):
+    o = db.query(Account).filter(Account.id == id).first()
+    if not o: raise HTTPException(404)
+    for k, v in a.model_dump().items(): setattr(o, k, v)
+    db.commit()
+    db.refresh(o)
+    o.balance = o.initial_balance
+    return o
+
+@app.delete("/api/accounts/{id}")
+def delete_account(id: int, db: Session = Depends(get_db)):
+    db.query(Account).filter(Account.id == id).delete()
+    db.commit()
+    return {"ok": True}
+
 @app.get("/api/transactions", response_model=List[TransactionOut])
 def read_transactions(account_id: Optional[int] = None, db: Session = Depends(get_db)):
     q = db.query(Transaction)
     if account_id: q = q.filter(or_(Transaction.account_id == account_id, Transaction.target_account_id == account_id))
-    # [修改] 排序逻辑：日期降序 -> sort_order 升序 -> ID 降序
     return q.order_by(Transaction.date.desc(), Transaction.sort_order.asc(), Transaction.id.desc()).all()
 
 @app.post("/api/transactions", response_model=TransactionOut)
@@ -210,9 +257,9 @@ def create_transaction(item: TransactionCreate, db: Session = Depends(get_db)):
         if not item.target_account_id or item.account_id == item.target_account_id: raise HTTPException(400, "转账账户错误")
     if item.type == "EXPENSE" and item.fund_account_id and item.account_id == item.fund_account_id: raise HTTPException(400, "资金账户错误")
 
-    # 新增记录 sort_order 默认为 0，或者你可以查询当前最大值+1（这里简化处理，手动排序后再更新）
     db_item = Transaction(**item.model_dump(exclude={'fund_account_id'}))
-    db.add(db_item); db.flush()
+    db.add(db_item)
+    db.flush()
 
     if item.type == "EXPENSE" and item.fund_account_id:
         db.add(Transaction(
@@ -220,24 +267,27 @@ def create_transaction(item: TransactionCreate, db: Session = Depends(get_db)):
             account_id=item.fund_account_id, target_account_id=item.account_id,
             note=f"自动转账 ({item.category})", link_id=db_item.id
         ))
-    db.commit(); db.refresh(db_item); return db_item
+    db.commit()
+    db.refresh(db_item)
+    return db_item
 
 @app.put("/api/transactions/{id}", response_model=TransactionOut)
 def update_transaction(id: int, item: TransactionUpdate, db: Session = Depends(get_db)):
-    o = db.query(Transaction).filter(Transaction.id==id).first()
+    o = db.query(Transaction).filter(Transaction.id == id).first()
     if not o: raise HTTPException(404)
-    [setattr(o, k, v) for k, v in item.model_dump().items()]
-    db.commit(); db.refresh(o); return o
+    for k, v in item.model_dump().items(): setattr(o, k, v)
+    db.commit()
+    db.refresh(o)
+    return o
 
 @app.delete("/api/transactions/{id}")
 def delete_transaction(id: int, db: Session = Depends(get_db)):
-    db.query(Transaction).filter(or_(Transaction.id==id, Transaction.link_id==id)).delete()
-    db.commit(); return {"ok": True}
+    db.query(Transaction).filter(or_(Transaction.id == id, Transaction.link_id == id)).delete()
+    db.commit()
+    return {"ok": True}
 
-# [新增] 重新排序接口
 @app.post("/api/transactions/reorder")
 def reorder_transactions(items: List[SortItem], db: Session = Depends(get_db)):
-    # 批量更新
     for item in items:
         db.query(Transaction).filter(Transaction.id == item.id).update({"sort_order": item.sort_order})
     db.commit()
