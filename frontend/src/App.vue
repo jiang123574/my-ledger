@@ -17,6 +17,9 @@ const accountForm = ref({ name: '', type: '现金', initial_balance: '', billing
 const isCatEdit = ref(false); const editCatId = ref(null)
 const categoryForm = ref({ name: '', type: 'EXPENSE', parent_id: '' })
 
+// [新增] 报表视图的选中状态
+const selectedReport = ref('overview')
+
 // --- 拖拽状态 ---
 const draggingId = ref(null)
 const draggingDate = ref(null)
@@ -181,65 +184,109 @@ onMounted(fetchData)
   <div class="app-layout">
     <div class="sidebar">
       <div class="logo-area"><span class="logo-icon">💰</span> <span style="font-weight: bold;">我的账本</span></div>
-      <div class="nav-item" :class="{active: activeView==='transactions' && !selectedAccount}" @click="activeView='transactions'; selectedAccount=null"><span class="icon">📂</span> 所有交易</div>
-      <div class="account-group" v-for="(group, type) in groupedAccounts" :key="type">
-        <div class="group-header"><span>{{ type }}</span><span>¥{{ group.total.toFixed(2) }}</span></div>
-        <div class="nav-item sub-item" v-for="acc in group.accounts" :key="acc.id" :class="{active: selectedAccount?.id===acc.id}" @click="activeView='transactions'; selectedAccount=acc">
-          <div style="flex: 1;"><div class="acc-row-main"><span class="acc-name">{{ acc.name }}</span><span class="acc-balance" :class="{'text-green': acc.balance<0}">{{ acc.balance.toFixed(2) }}</span></div>
-            <div v-if="acc.type==='信用卡' && creditStatsMap[acc.id]" class="credit-details"><div class="cd-row"><span>本期应还:</span><span :class="{'text-warn': creditStatsMap[acc.id].statement > 0}">{{ creditStatsMap[acc.id].statement.toFixed(2) }}</span></div><div class="cd-row"><span>未出账单:</span><span>{{ creditStatsMap[acc.id].unbilled.toFixed(2) }}</span></div></div>
-          </div>
-        </div>
-      </div>
+      
+      <div class="nav-item" :class="{active: activeView==='transactions'}" @click="activeView='transactions'; selectedAccount=null"><span class="icon">🏦</span> 账户交易</div>
+      
+      <div class="nav-item" :class="{active: activeView==='reports'}" @click="activeView='reports'; selectedAccount=null"><span class="icon">📊</span> 报表分析</div>
+      
       <div class="spacer"></div>
       <div class="nav-item settings-btn" :class="{active: activeView==='settings'}" @click="activeView='settings'"><span class="icon">⚙️</span> 设置中心</div>
     </div>
+    
     <div class="main-content">
-      <div v-if="activeView === 'transactions'" class="view-container">
-        <div class="top-stats">
-          <div class="stat-item"><div class="stat-label">净资产</div><div class="stat-value text-blue">{{ assetStats.netWorth }}</div></div>
-          <div class="stat-item"><div class="stat-label">总资产</div><div class="stat-value text-red">{{ assetStats.assets }}</div></div>
-          <div class="stat-item"><div class="stat-label">总负债</div><div class="stat-value text-green">{{ assetStats.liabilities }}</div></div>
-          <div style="flex:1"></div><button class="btn-record" @click="openCreateTransaction">✏️ 记一笔</button>
-        </div>
-        <div class="table-container">
-          <div class="filter-bar">
-            <div class="left-tools"><span class="current-view">{{ selectedAccount ? selectedAccount.name : '所有账户' }}</span></div>
-            <div class="date-tools">
-              <div class="mode-switch"><button :class="{active: filterMode==='ALL'}" @click="filterMode='ALL'">全部</button><button :class="{active: filterMode==='YEAR'}" @click="filterMode='YEAR'">年</button><button :class="{active: filterMode==='MONTH'}" @click="filterMode='MONTH'">月</button><button :class="{active: filterMode==='WEEK'}" @click="filterMode='WEEK'">周</button></div>
-              <div class="date-nav" v-if="filterMode !== 'ALL'"><button class="nav-btn" @click="shiftDate(-1)">◀</button><span class="date-label">{{ dateLabel }}</span><button class="nav-btn" @click="shiftDate(1)">▶</button><button class="nav-btn today" @click="cursorDate=new Date()">今</button></div>
+      
+      <div v-if="activeView === 'transactions'" class="transactions-view-container">
+          <div class="transactions-sidebar">
+              <h3 style="margin: 0; padding: 15px 20px; font-size: 16px; border-bottom: 1px solid #eee;">账户列表</h3>
+              
+              <div 
+                  class="nav-item" 
+                  :class="{active: activeView==='transactions' && !selectedAccount}" 
+                  @click="selectedAccount=null"
+              >
+                  <span class="icon">📂</span> 所有交易
+              </div>
+
+              <div class="account-group" v-for="(group, type) in groupedAccounts" :key="type" style="padding: 0 10px;">
+                  <div class="group-header" style="padding-left: 20px;"><span>{{ type }}</span><span>¥{{ group.total.toFixed(2) }}</span></div>
+                  <div class="nav-item sub-item" v-for="acc in group.accounts" :key="acc.id" :class="{active: selectedAccount?.id===acc.id}" @click="selectedAccount=acc" style="padding-left: 20px;">
+                      <div style="flex: 1;">
+                          <div class="acc-row-main"><span class="acc-name">{{ acc.name }}</span><span class="acc-balance" :class="{'text-green': acc.balance<0}">{{ acc.balance.toFixed(2) }}</span></div>
+                          <div v-if="acc.type==='信用卡' && creditStatsMap[acc.id]" class="credit-details">
+                            <div class="cd-row"><span>本期应还:</span><span :class="{'text-warn': creditStatsMap[acc.id].statement > 0}">{{ creditStatsMap[acc.id].statement.toFixed(2) }}</span></div>
+                            <div class="cd-row"><span>未出账单:</span><span>{{ creditStatsMap[acc.id].unbilled.toFixed(2) }}</span></div>
+                          </div>
+                      </div>
+                  </div>
+              </div>
+          </div>
+
+          <div class="transaction-content-area">
+            <div class="top-stats">
+              <div class="stat-item"><div class="stat-label">净资产</div><div class="stat-value text-blue">{{ assetStats.netWorth }}</div></div>
+              <div class="stat-item"><div class="stat-label">总资产</div><div class="stat-value text-red">{{ assetStats.assets }}</div></div>
+              <div class="stat-item"><div class="stat-label">总负债</div><div class="stat-value text-green">{{ assetStats.liabilities }}</div></div>
+              <div style="flex:1"></div><button class="btn-record" @click="openCreateTransaction">✏️ 记一笔</button>
+            </div>
+            <div class="table-container">
+              <div class="filter-bar">
+                <div class="left-tools"><span class="current-view">{{ selectedAccount ? selectedAccount.name : '所有账户' }}</span></div>
+                <div class="date-tools">
+                  <div class="mode-switch"><button :class="{active: filterMode==='ALL'}" @click="filterMode='ALL'">全部</button><button :class="{active: filterMode==='YEAR'}" @click="filterMode='YEAR'">年</button><button :class="{active: filterMode==='MONTH'}" @click="filterMode='MONTH'">月</button><button :class="{active: filterMode==='WEEK'}" @click="filterMode='WEEK'">周</button></div>
+                  <div class="date-nav" v-if="filterMode !== 'ALL'"><button class="nav-btn" @click="shiftDate(-1)">◀</button><span class="date-label">{{ dateLabel }}</span><button class="nav-btn" @click="shiftDate(1)">▶</button><button class="nav-btn today" @click="cursorDate=new Date()">今</button></div>
+                </div>
+              </div>
+              <table>
+                <thead><tr><th width="120">日期</th><th>分类</th><th class="text-right">流入(收)</th><th class="text-right">流出(支)</th><th>账户</th><th>备注/标签</th><th width="80">操作</th></tr></thead>
+                <tbody>
+                  <tr 
+                    v-for="t in filteredTransactions" 
+                    :key="t.id"
+                    draggable="true"
+                    @dragstart="onDragStart($event, t)"
+                    @dragover="onDragOver($event, t)"
+                    @drop="onDrop($event, t)"
+                    class="draggable-row"
+                  >
+                    <td class="text-gray cursor-grab">{{ t.date.split('T')[0] }}</td>
+                    <td>{{ t.type==='TRANSFER'?'转账':t.category }}</td>
+                    <td class="text-right text-red"><span v-if="t.type==='INCOME'||(t.type==='TRANSFER'&&t.target_account_id===selectedAccount?.id)">+{{ t.amount }}</span></td>
+                    <td class="text-right text-green"><span v-if="t.type==='EXPENSE'||(t.type==='TRANSFER'&&(!selectedAccount||t.account_id===selectedAccount?.id))">-{{ t.amount }}</span></td>
+                    <td class="text-gray">{{ t.type==='TRANSFER'?`${t.account_name} ➜ ${t.target_account_name}`:t.account_name }}</td>
+                    <td class="text-gray"><span v-if="t.tag" class="tag-badge">{{ t.tag }}</span>{{ t.note }}</td>
+                    <td>
+                      <button class="btn-icon" @click="openEditTransaction(t)" title="编辑">✎</button>
+                      <button class="btn-icon" @click="deleteTransaction(t.id)" title="删除">🗑</button>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+              <div v-if="transactions.length===0" class="empty-state">暂无数据</div>
+              <div class="table-footer" v-if="filteredTransactions.length > 0">
+                <span>{{ dateLabel }} 合计：</span><span class="stat-pill income">收入: {{ periodStats.income }}</span><span class="stat-pill expense">支出: {{ periodStats.expense }}</span><span class="stat-pill balance">结余: {{ periodStats.balance }}</span>
+              </div>
             </div>
           </div>
-          <table>
-            <thead><tr><th width="120">日期</th><th>分类</th><th class="text-right">流入(收)</th><th class="text-right">流出(支)</th><th>账户</th><th>备注/标签</th><th width="80">操作</th></tr></thead>
-            <tbody>
-              <tr 
-                v-for="t in filteredTransactions" 
-                :key="t.id"
-                draggable="true"
-                @dragstart="onDragStart($event, t)"
-                @dragover="onDragOver($event, t)"
-                @drop="onDrop($event, t)"
-                class="draggable-row"
-              >
-                <td class="text-gray cursor-grab">{{ t.date.split('T')[0] }}</td>
-                <td>{{ t.type==='TRANSFER'?'转账':t.category }}</td>
-                <td class="text-right text-red"><span v-if="t.type==='INCOME'||(t.type==='TRANSFER'&&t.target_account_id===selectedAccount?.id)">+{{ t.amount }}</span></td>
-                <td class="text-right text-green"><span v-if="t.type==='EXPENSE'||(t.type==='TRANSFER'&&(!selectedAccount||t.account_id===selectedAccount?.id))">-{{ t.amount }}</span></td>
-                <td class="text-gray">{{ t.type==='TRANSFER'?`${t.account_name} ➜ ${t.target_account_name}`:t.account_name }}</td>
-                <td class="text-gray"><span v-if="t.tag" class="tag-badge">{{ t.tag }}</span>{{ t.note }}</td>
-                <td>
-                  <button class="btn-icon" @click="openEditTransaction(t)" title="编辑">✎</button>
-                  <button class="btn-icon" @click="deleteTransaction(t.id)" title="删除">🗑</button>
-                </td>
-              </tr>
-            </tbody>
-          </table>
-          <div v-if="transactions.length===0" class="empty-state">暂无数据</div>
-          <div class="table-footer" v-if="filteredTransactions.length > 0">
-            <span>{{ dateLabel }} 合计：</span><span class="stat-pill income">收入: {{ periodStats.income }}</span><span class="stat-pill expense">支出: {{ periodStats.expense }}</span><span class="stat-pill balance">结余: {{ periodStats.balance }}</span>
-          </div>
-        </div>
       </div>
+      
+      <div v-if="activeView === 'reports'" class="reports-view-container">
+          <div class="reports-sidebar">
+              <h3 style="margin: 0; padding: 20px; font-size: 16px; border-bottom: 1px solid #eee;">报表选项</h3>
+              <div class="nav-item" :class="{active: selectedReport==='overview'}" @click="selectedReport='overview'">🧾 财务概览</div>
+              <div class="nav-item" :class="{active: selectedReport==='category'}" @click="selectedReport='category'">📈 分类收支统计</div>
+              <div class="nav-item" :class="{active: selectedReport==='trend'}" @click="selectedReport='trend'">📉 趋势分析</div>
+          </div>
+          <div class="reports-display">
+              <h2 style="padding: 20px 30px; margin: 0; border-bottom: 1px solid #eee;">
+                  {{ selectedReport === 'overview' ? '财务概览' : selectedReport === 'category' ? '分类收支统计' : '收支趋势' }}
+              </h2>
+              <div style="padding: 30px; color: #666;">
+                  <p>这里是报表显示区域。根据您在左侧报告选项栏（第二栏）选择的类型显示具体内容。</p>
+                  <p style="margin-top: 30px; color: #999;">报表功能正在开发中...</p>
+              </div>
+          </div>
+      </div>
+      
       <div v-if="activeView === 'settings'" class="view-container settings-view">
         <h2 style="padding: 20px 30px; margin: 0; border-bottom: 1px solid #eee;">设置中心</h2>
         <div class="settings-tabs"><button :class="{active: settingsTab==='accounts'}" @click="settingsTab='accounts'">账户管理</button><button :class="{active: settingsTab==='categories'}" @click="settingsTab='categories'">分类管理</button></div>
@@ -261,7 +308,8 @@ onMounted(fetchData)
 /* 样式部分 */
 body { margin: 0; font-family: -apple-system, sans-serif; background-color: #f0f0f0; color: #333; }
 .app-layout { display: flex; height: 100vh; width: 100vw; }
-.sidebar { width: 240px; background: #f7f7f7; border-right: 1px solid #ddd; display: flex; flex-direction: column; }
+/* [修改 1]: 第一栏变窄 */
+.sidebar { width: 180px; background: #f7f7f7; border-right: 1px solid #ddd; display: flex; flex-direction: column; }
 .main-content { flex: 1; display: flex; flex-direction: column; background: #fff; overflow: hidden; }
 .view-container { display: flex; flex-direction: column; height: 100%; }
 .filter-bar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; background: #fff; border-bottom: 1px solid #eee; padding-bottom: 15px; }
@@ -316,10 +364,39 @@ body { margin: 0; font-family: -apple-system, sans-serif; background-color: #f0f
 .tag-chip { background: #f0f0f0; color: #666; padding: 4px 12px; border-radius: 20px; font-size: 12px; cursor: pointer; border: 1px solid transparent; } .tag-chip:hover { background: #e0e0e0; } .tag-chip.active { background: #e8f4fc; color: #3498db; border-color: #3498db; font-weight: bold; }
 .tag-badge { background: #e8f4fc; color: #3498db; padding: 2px 6px; border-radius: 4px; font-size: 11px; margin-right: 5px; border: 1px solid #d6eaf8; }
 .nav-item { padding: 10px 20px; cursor: pointer; display: flex; align-items: center; gap: 10px; color: #555; } .nav-item:hover { background: #eaeaea; } .nav-item.active { background: #e0e0e0; color: #000; font-weight: 500; border-left: 3px solid #3498db; }
-.nav-item.sub-item { padding-left: 45px; flex-direction: column; align-items: flex-start; gap: 0; padding-top: 8px; padding-bottom: 8px; }
+/* 针对第二栏的子项样式，取消了左侧额外的 padding，现在由模板中的 inline style 控制 */
+.nav-item.sub-item { flex-direction: column; align-items: flex-start; gap: 0; padding-top: 8px; padding-bottom: 8px; }
 .acc-row-main { display: flex; justify-content: space-between; width: 100%; align-items: center; }
-.credit-details { background: #fff; margin-top: 6px; padding: 6px 10px; border-radius: 6px; border: 1px solid #eee; width: 100%; box-sizing: border-box; }
-.cd-row { display: flex; justify-content: space-between; font-size: 11px; color: #7f8c8d; margin-bottom: 2px; } .cd-row:last-child { margin-bottom: 0; }
+.acc-name { 
+    /* 确保账户名不会太长而挤压余额 */
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    /* 增加账户名和余额之间的最小间距 */
+    margin-right: 15px; /* 增加间距 */
+    max-width: 60%; /* 限制账户名最大宽度，为余额留出更多空间 */
+}
+/* [修改 3]: 信用卡详情左右并排显示 */
+.credit-details { 
+    background: #fff; 
+    margin-top: 6px; 
+    padding: 6px 10px; 
+    border-radius: 6px; 
+    border: 1px solid #eee; 
+    width: 100%; 
+    box-sizing: border-box; 
+    display: flex; /* 启用 Flex 布局 */
+    gap: 15px; /* 增加两组信息之间的间距 */
+    justify-content: space-between;
+}
+.cd-row { 
+    display: flex; 
+    justify-content: space-between; 
+    font-size: 11px; 
+    color: #7f8c8d; 
+    margin-bottom: 0; /* 消除垂直间距 */
+    flex: 1; /* 让两组信息平分空间 */
+} 
 .text-warn { color: #e67e22; font-weight: bold; }
 .group-header { padding: 5px 20px; font-size: 12px; color: #999; display: flex; justify-content: space-between; margin-top: 10px; }
 .text-right { text-align: right; } .text-red { color: #e74c3c; } .text-green { color: #27ae60; } .text-blue { color: #3498db; } .text-gray { color: #999; } .spacer { flex: 1; }
@@ -331,4 +408,75 @@ table { width: 100%; border-collapse: collapse; font-size: 13px; } th { text-ali
 .draggable-row { cursor: grab; transition: background 0.2s; }
 .draggable-row:active { cursor: grabbing; }
 .dragging-row { opacity: 0.5; background: #e8f4fc; }
+
+/* 交易视图的三栏布局样式 (整体三栏中的第二栏和第三栏) */
+.transactions-view-container { 
+    display: flex; 
+    height: 100%; 
+    flex: 1; 
+    background: #f9f9f9; 
+    flex-direction: row; 
+}
+/* [修改 2]: 第二栏加宽 */
+.transactions-sidebar { 
+    width: 260px; /* 第二栏的宽度 */
+    background: #fff; 
+    border-right: 1px solid #eee; 
+    flex-shrink: 0; 
+    overflow-y: auto;
+}
+.transaction-content-area {
+    flex: 1; /* 第三栏占据剩余空间 */
+    display: flex; 
+    flex-direction: column;
+    overflow: hidden;
+    background: white;
+}
+/* 调整交易侧边栏的导航项样式以匹配主侧边栏 */
+.transactions-sidebar .nav-item {
+    padding: 10px 20px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    color: #555;
+    border-left: 3px solid transparent; 
+}
+.transactions-sidebar .nav-item:hover { background: #eaeaea; } 
+.transactions-sidebar .nav-item.active { background: #e0e0e0; color: #000; font-weight: 500; border-left: 3px solid #3498db; }
+
+/* 报表视图的三栏布局样式 */
+.reports-view-container { 
+    display: flex; 
+    height: 100%; 
+    flex: 1; 
+    background: #f9f9f9; 
+    flex-direction: row; 
+}
+/* [修改 2]: 报表第二栏加宽 */
+.reports-sidebar { 
+    width: 260px; 
+    background: #fff; 
+    border-right: 1px solid #eee; 
+    flex-shrink: 0; 
+    display: flex;
+    flex-direction: column;
+}
+.reports-display { 
+    flex: 1; 
+    background: white; 
+    overflow-y: auto; 
+}
+/* 调整报表侧边栏的导航项样式以匹配主侧边栏 */
+.reports-sidebar .nav-item {
+    padding: 10px 20px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    color: #555;
+    border-left: 3px solid transparent; 
+}
+.reports-sidebar .nav-item:hover { background: #eaeaea; } 
+.reports-sidebar .nav-item.active { background: #e0e0e0; color: #000; font-weight: 500; border-left: 3px solid #3498db; }
 </style>
